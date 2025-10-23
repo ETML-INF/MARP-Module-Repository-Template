@@ -1,4 +1,4 @@
-name: Build and Deploy All MARP Presentations
+name: Build and Deploy All MARP Presentations to github pages
 
 on:
   push:

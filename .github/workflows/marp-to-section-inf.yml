@@ -1,4 +1,4 @@
-name: Build Slides (MARP)
+name: Build and upload slides to section-inf
 
 on:
   push:
@@ -23,9 +23,7 @@ jobs:
       - name: Check ICT_MODULE
         run: |
           if [ -z "${ICT_MODULE}" ]; then
-            REPO_URL="https://github.com/${GITHUB_REPOSITORY}/settings/secrets/actions"
             echo "::error::❌ ICT_MODULE non défini. Configurez-le dans Settings → Actions → Variables."
-            echo "🔗 [Ouvrir la configuration des variables](${REPO_URL})"
             exit 1
           else
             echo "✅ ICT_MODULE=${ICT_MODULE}"
@@ -41,13 +39,13 @@ jobs:
       - name: Install marp-cli
         run: npm i -g @marp-team/marp-cli
 
-      - name: Build slides (HTML + PDF)
+      - name: Build slides (HTML)
         run: |
           set -euo pipefail
           SRC_DIR="b-UnitesEnseignement/Presentations"
           OUT_HTML="${SRC_DIR}/dist/html"
-          OUT_PDF="${SRC_DIR}/dist/pdf"
-          mkdir -p "${OUT_HTML}" "${OUT_PDF}"
+          STYLE_DIR="${SRC_DIR}/style"
+          mkdir -p "${OUT_HTML}"
 
           shopt -s nullglob
           FILES=(${SRC_DIR}/*.md)
@@ -57,16 +55,12 @@ jobs:
 
           for f in "${FILES[@]}"; do
             base="$(basename "${f%.md}")"
-            echo "➡️  Compile ${base}.md"
-            # HTML
             marp "${f}" --html --allow-local-files \
+              --theme-set "${SRC_DIR}/style" \
               --output "${OUT_HTML}/${base}.html"
-            # PDF
-            marp "${f}" --pdf --allow-local-files \
-              --output "${OUT_PDF}/${base}.pdf"
           done
 
-          ROOT_INDEX="b-UnitesEnseignement/Presentations/index.php"
+          ROOT_INDEX="${SRC_DIR}/index.php"
           if [ -f "${ROOT_INDEX}" ]; then
             echo "ℹ️  index.php détecté → copie dans ${OUT_HTML}/"
             cp "${ROOT_INDEX}" "${OUT_HTML}/index.php"
@@ -74,29 +68,35 @@ jobs:
             echo "ℹ️  Aucun index.php à la racine de Presentations/"
           fi
 
+          STYLE_FOLDER="${SRC_DIR}/style"
+          if [ -d "${STYLE_FOLDER}" ]; then
+            echo "ℹ️  Dossier style détecté → copie dans ${OUT_HTML}/"
+            cp -r "${STYLE_FOLDER}" "${OUT_HTML}/"
+          else
+            echo "ℹ️  Aucun dossier style à la racine de Presentations/"
+          fi
+
       - name: Upload slides artifact
         uses: actions/upload-artifact@v4
         with:
           name: slides-site
-          path: |
-            b-UnitesEnseignement/Presentations/dist/**
-            b-UnitesEnseignement/Presentations/style
+          path: b-UnitesEnseignement/Presentations/dist/html/**
+          if-no-files-found: error
           retention-days: 7
 
   web-deploy:
+    name: "🎉 Deploy"
     needs: build
-    name: 🎉 Deploy
     runs-on: ubuntu-latest
     steps:
       - name: ⬇️ Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: slides-site
-          path: site
+          path: site/dist/html
 
-      # 1) dist/html (pages) -> ${FTP_PRESENTATIONS_DIR}/
       - name: 📂 Sync HTML deck(s)
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
         with:
           server: ${{ vars.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
@@ -104,40 +104,7 @@ jobs:
           protocol: ftps
           port: 21
           local-dir: site/dist/html/
-          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_PRESENTATIONS_DIR }}/
+          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE }}/${{ vars.FTP_PRESENTATIONS_DIR }}/
           state-name: .ftp-sync-html.json
           log-level: minimal
-          timeout: 120000
-
-      # 2) dist/pdf (export) -> ${FTP_PRESENTATIONS_DIR}/pdf/
-      - name: 📂 Sync PDF export(s)
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ vars.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }}
-          protocol: ftps
-          port: 21
-          local-dir: site/dist/pdf/
-          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_PRESENTATIONS_DIR }}/pdf/
-          state-name: .ftp-sync-pdf.json
-          log-level: minimal
-          timeout: 120000
-
-      # 3) style (optionnel, sans sources .xcf) -> ${FTP_PRESENTATIONS_DIR}/style/
-      - name: 📂 Sync style
-        if: ${{ hashFiles('site/style/**') != '' }}
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ vars.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }}
-          protocol: ftps
-          port: 21
-          local-dir: site/style/
-          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_PRESENTATIONS_DIR }}/style/
-          state-name: .ftp-sync-style.json
-          log-level: minimal
-          exclude: |
-            **/*.xcf
-          timeout: 120000
+          timeout: 300000

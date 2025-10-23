@@ -1,0 +1,74 @@
+/* @theme etml */
+/* MODELE **facilement modifiable**
+   Copie ce fichier (ex: `mon_theme.css.example` → `mon_theme.css`), puis ajuste SEULEMENT les tokens.
+   Marp reconnaitra le thème via la directive `@theme` ci-dessus.
+   Cherche `TODO` pour savoir quoi modifier.
+*/
+
+:root{
+  --brand-primary:   #3b82f6;
+  --brand-secondary: #1e3a8a;
+  --brand-accent:    #22c55e;
+  --text-main:  #0f172a;
+  --text-muted: #475569;
+  --bg-slide:   #ffffff;
+  --bar-bg:     #f8fafc;
+  --bar-fg:     #0f172a;
+  --bar-border: #e2e8f0;
+  --code-bg: #0b1220;
+  --code-fg: #e5e7eb;
+  --header-h: 8%;
+  --footer-h: 12%;
+  --text-left: 25%;
+  --text-width: 65%;
+  --font-ui: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --h1-shadow: 1px 2px 4px rgba(0,0,0,.15);
+}
+
+/* ===== BASE ===== */
+section{
+  position: relative;
+  box-sizing: border-box;
+  font-family: var(--font-ui);
+  color: var(--text-main);
+  background: var(--bg-slide);
+  padding: 3.6rem 2.2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* Titres */
+section h1{
+  font-size: 3.4rem;
+  color: var(--brand-secondary);
+  font-weight: 700;
+  text-shadow: var(--h1-shadow);
+}
+section h2{ font-size: 1.9rem; color: var(--brand-primary); }
+section h3{ font-size: 1.2rem; color: var(--text-muted); }
+
+/* Texte principal */
+section p, section li{
+  font-size: 2rem;
+  line-height: 1.7;
+  margin: 0 0 1.6rem 0;
+  width: var(--text-width);
+  margin-left: var(--text-left);
+}
+section ul, section ol{ margin-left: var(--text-left); padding-left: 1rem; }
+
+/* Liens */
+section a{
+  color: var(--brand-primary);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(59,130,246,.25);
+}
+section a:hover{ border-bottom-color: rgba(59,130,246,.6); }
+
+/* Slides types */
+section.title{ display: grid; place-items: center; text-align: center; background: #ffffff; }
+section.question{ display: flex; align-items: center; justify-content: center; text-align: center; }
+section.schema{ text-align: center; }
+section.quote{ text-align: center; font-style: italic; }

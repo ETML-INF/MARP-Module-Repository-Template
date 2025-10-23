@@ -16,8 +16,8 @@ Ce workflow :
 
 ## 🔄 **Déclencheurs du Workflow**
 Le workflow s’exécute **automatiquement** lorsque :
-1. Un **fichier Markdown (`.md`) est modifié ou ajouté** dans `b-UnitesEnseignement/Support/`
-2. Une **image (`.jpg`, `.png`, etc.) est ajoutée** dans `b-UnitesEnseignement/Support/img/`
+1. Un **fichier Markdown (`.md`) est modifié ou ajouté** dans `b-UnitesEnseignement/Presentations/`
+2. Une **image (`.jpg`, `.png`, etc.) est ajoutée** dans `b-UnitesEnseignement/Presentations/img/`
 3. Un **exercice PDF est ajouté ou modifié** dans `b-UnitesEnseignement/Exercices/`
 4. Une **Pull Request est ouverte/modifiée** avec ces fichiers
 
@@ -30,13 +30,13 @@ Le workflow s’exécute **automatiquement** lorsque :
 on:
   push:
     paths:
-      - 'b-UnitesEnseignement/Support/*.md'  
-      - 'b-UnitesEnseignement/Support/img/**'  
+      - 'b-UnitesEnseignement/Presentations/*.md'  
+      - 'b-UnitesEnseignement/Presentations/img/**'  
       - 'b-UnitesEnseignement/Exercices/*.pdf'  
   pull_request:
     paths:
-      - 'b-UnitesEnseignement/Support/*.md'
-      - 'b-UnitesEnseignement/Support/img/**'
+      - 'b-UnitesEnseignement/Presentations/*.md'
+      - 'b-UnitesEnseignement/Presentations/img/**'
       - 'b-UnitesEnseignement/Exercices/*.pdf'
 ```
 📌 **Déclenche le workflow lorsqu'un fichier correspondant est modifié dans ces répertoires.**
@@ -69,7 +69,7 @@ permissions:
 
 ### 🔹 4. **Création et génération des fichiers MARP**
 ```yaml
-for file in b-UnitesEnseignement/Support/*.md; do
+for file in b-UnitesEnseignement/Presentations/*.md; do
   filename=$(basename "$file" .md)
 
   marp "$file" --html --allow-local-files --output "public/${filename}.html"

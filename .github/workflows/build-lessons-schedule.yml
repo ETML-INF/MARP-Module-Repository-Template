@@ -1,0 +1,295 @@
+name: Build Lessons Schedule
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "b-UnitesEnseignement/**"
+      - "b-UnitesEnseignement/**"
+      - ".github/workflows/tardis.yml"
+  pull_request:
+
+concurrency:
+  group: manifests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ICT_MODULE: ${{ vars.ICT_MODULE }}
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    steps:
+      - name: Check ICT_MODULE
+        run: |
+          if [ -z "${ICT_MODULE}" ]; then
+            REPO_URL="https://github.com/${GITHUB_REPOSITORY}/settings/secrets/actions"
+            echo "::error::❌ ICT_MODULE non défini. Configurez-le dans Settings → Actions → Variables."
+            echo "🔗 [Ouvrir la configuration des variables](${REPO_URL})"
+            exit 1
+          else
+            echo "✅ ICT_MODULE=${ICT_MODULE}"
+          fi
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build unified manifest (tardis.yml, Node-only)
+        env:
+          SRC_DIR: .
+          OUT_DIR: b-UnitesEnseignement/_build/manifests
+        run: |
+          set -euo pipefail
+          npm --silent init -y >/dev/null
+          npm --silent install yaml@2 glob@10 >/dev/null
+
+          node <<'NODE'
+          const fs = require('fs/promises');
+          const path = require('path');
+          const { glob } = require('glob');
+          const YAML = require('yaml');
+
+          const SRC_DIR = process.env.SRC_DIR || '.';
+          const OUT_DIR = process.env.OUT_DIR || '_build/manifests';
+          const ALLOWED_TYPES = new Set(['accroche','exo','activity','tp','slides','reading']);
+
+          // --- helpers sanitation / parsing ---
+          const stripBOM = s => s.replace(/^\uFEFF/, '');
+          const normalizeQuotes = s => s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+          const sanitize = s => normalizeQuotes(stripBOM(s))
+              .replace(/\r\n/g, '\n')
+              .replace(/\t/g, '  ')
+              .replace(/\u00A0/g, ' ');
+          const extractFM = md => {
+            const m = md.match(/^---\s*\n([\s\S]*?)\n(?:---|\.\.\.)/);
+            return m ? m[1] : null;
+          };
+          const firstNonEmpty = t => (t||'').split('\n').find(l => l.trim())?.trim() || '';
+          const seqKey = seq => {
+            const m = /^SEQ-(\d+)$/.exec((seq||'').trim());
+            return m ? ['0', Number(m[1])] : ['1', (seq||'').toLowerCase()];
+          };
+
+          // parse minimal "legal" FM using YAML parser (plus tolérant que nos regex legacy)
+          function parseLegalFM(fmText){
+            try {
+              const y = YAML.parse(fmText) || {};
+              if (y.type !== 'legal') return null;
+              const out = {
+                module: y.module ?? null,
+                title: y.title ?? null,
+                author: Array.isArray(y.author) ? y.author : (typeof y.author === 'string' ? [y.author] : []),
+                requirements: Array.isArray(y.requirements) ? y.requirements : [],
+                objectifs_ict: Array.isArray(y.objectifs_ict) ? y.objectifs_ict : [],
+                sources: typeof y.sources === 'object' && y.sources ? y.sources : {},
+                license: y.license ?? null,
+                lastUpdate: new Date().toISOString().slice(0,10)
+              };
+              return out;
+            } catch { return null; }
+          }
+
+          (async () => {
+            await fs.mkdir(OUT_DIR, { recursive: true });
+
+            const files = await glob(SRC_DIR + '/**/*.md', { nodir: true });
+            console.log(`🔎 .md trouvés: ${files.length}`);
+
+            const legalBlocks = [];
+            const items = [];
+
+            for (const f of files) {
+              let raw = await fs.readFile(f, 'utf8');
+              raw = sanitize(raw);
+
+              // front matter obligatoire
+              const firstLine = (raw.split('\n')[0]||'').trim();
+              if (firstLine !== '---') {
+                // console.log(`⏭  Pas de FM: ${f}`);
+                continue;
+              }
+
+              let fm = extractFM(raw);
+              if (!fm) { console.log(`⚠️  FM vide: ${f}`); continue; }
+              fm = sanitize(fm);
+
+              // Sniff 1st key
+              const first = firstNonEmpty(fm);
+              const mType = /^type\s*:\s*([A-Za-z0-9_-]+)\s*$/.exec(first);
+              if (!mType) { console.log(`⏭  première ligne non reconnue: ${f}`); continue; }
+              const type = mType[1].toLowerCase();
+
+              if (type === 'legal') {
+                // on ne prend que legal/index.md
+                const base = path.basename(f).toLowerCase();
+                const parent = path.basename(path.dirname(f)).toLowerCase();
+                if (!(base === 'index.md' && parent === 'legal')) {
+                  console.log(`⏭  legal ignoré (pas legal/index.md): ${f}`);
+                  continue;
+                }
+                const parsed = parseLegalFM(fm);
+                if (parsed) {
+                  legalBlocks.push(parsed);
+                  console.log(`✅ legal pris: ${f}`);
+                } else {
+                  console.log(`⚠️  legal invalide: ${f}`);
+                }
+                continue;
+              }
+
+              if (!ALLOWED_TYPES.has(type)) {
+                console.log(`⏭  type non autorisé (${type}): ${f}`);
+                continue;
+              }
+
+              let data;
+              try { data = YAML.parse(fm) || {}; }
+              catch (e) { console.log(`❌ YAML invalide: ${f} -> ${e.message}`); continue; }
+
+              const entry = {
+                source_path: f,
+                type: (data.type ?? type),
+                id: data.id ?? null,
+                title: data.title ?? null,
+                seq: data.seq ?? null,
+                order: Number.isFinite(Number(data.order)) ? Number(data.order) : 9999,
+                method: data.method ?? null,
+                align_ict: Array.isArray(data.align_ict) ? data.align_ict : [],
+                goals: Array.isArray(data.goals) ? data.goals : [],
+                success_criteria: data.success_criteria ?? null,
+                duree: data.duree ?? null,
+                materiel: Array.isArray(data.materiel) ? data.materiel : [],
+              };
+
+              if (entry.id && entry.title && entry.seq) {
+                items.push(entry);
+                // console.log(`✅ pris: ${f}`);
+              } else {
+                console.log(`⚠️  FM incomplet (type/id/title/seq) : ${f}`);
+              }
+            }
+
+            // group by seq
+            const bySeq = new Map();
+            for (const it of items) {
+              if (!bySeq.has(it.seq)) bySeq.set(it.seq, []);
+              bySeq.get(it.seq).push(it);
+            }
+
+            // order sequences/items
+            const sequences = Array.from(bySeq.entries())
+              .sort((a,b) => {
+                const ka = seqKey(a[0]); const kb = seqKey(b[0]);
+                return ka[0].localeCompare(kb[0]) || (ka[1]-kb[1] || String(a[0]).localeCompare(String(b[0])));
+              })
+              .map(([seq, arr]) => ({
+                seq,
+                count: arr.length,
+                items: arr.sort((x,y) =>
+                  (x.order - y.order) || String(x.title||'').toLowerCase().localeCompare(String(y.title||'').toLowerCase())
+                )
+              }));
+
+            const index_by_seq = Object.fromEntries(sequences.map(s => [s.seq, s.items.map(i => i.id)]));
+
+            const by_type = {};
+            for (const it of items) by_type[it.type] = (by_type[it.type] || 0) + 1;
+
+            // assemble unified manifest
+            const manifest = {
+              version: 1,
+              generated_at: new Date().toISOString(),
+              root: process.cwd(),
+              // section légale (un ou plusieurs)
+              ...(legalBlocks.length === 1
+                ? { legal: legalBlocks[0] }
+                : (legalBlocks.length > 1 ? { legal_modules: legalBlocks } : {})),
+              sequences,
+              index_by_seq,
+              stats: {
+                total_front_matters: items.length,
+                total_sequences: sequences.length,
+                by_type
+              }
+            };
+
+            const outDir = process.env.OUT_DIR;
+            const yamlText = YAML.stringify(manifest, { indent: 2, lineWidth: 120 });
+            await fs.writeFile(path.join(outDir, "tardis.json"), JSON.stringify(manifest, null, 2), "utf8");
+            await fs.writeFile(path.join(outDir, "tardis.yml"), YAML.stringify(manifest), "utf8");
+            
+
+            if (items.length === 0) {
+              console.error('❌ Aucun item admissible trouvé — échec pour éviter un manifeste vide.');
+              process.exit(2);
+            }
+          })().catch(e => { console.error(e); process.exit(1); });
+          NODE
+
+      - name: 📦 Upload manifests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifests
+          path: b-UnitesEnseignement/_build/manifests
+          retention-days: 7
+
+      - name: 📦 Upload TARDIS UI files
+        uses: actions/upload-artifact@v4
+        with:
+          name: tardis-ui
+          path: |
+            a-IdentificationModule/index.html
+            a-IdentificationModule/styles.css
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: ⬇️ Download manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: manifests
+          path: site
+
+      - name: 📂 Deploy manifests
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ vars.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: site/
+          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_TARDIS_DIR }}/manifests/
+          state-name: .ftp-sync-manifests.json
+          log-level: minimal
+          timeout: 120000
+
+
+      - name: ⬇️ Download UI files
+        uses: actions/download-artifact@v4
+        with:
+          name: tardis-ui
+          path: site-ui
+
+      - name: 📂 Deploy TARDIS UI
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ vars.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: site-ui/
+          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_TARDIS_DIR }}/ 
+          state-name: .ftp-sync-ui.json
+          log-level: minimal
+          timeout: 120001

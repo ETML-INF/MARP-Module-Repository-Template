@@ -1,0 +1,336 @@
+name: Build Docs, PDF and upload to section-inf
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "b-UnitesEnseignement/Support/**"
+      - "requirements.txt"
+      - ".github/workflows/build-docs-and-exo.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      ICT_MODULE: ${{ vars.ICT_MODULE }}
+      SPHINX_SRC_DIR: b-UnitesEnseignement/Support
+    steps:
+      - name: Check ICT_MODULE
+        run: |
+          if [ -z "${ICT_MODULE}" ]; then
+            echo "::error::❌ ICT_MODULE non défini. Configurez-le dans Settings → Actions → Variables."
+            exit 1
+          else
+            echo "✅ ICT_MODULE=${ICT_MODULE}"
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build docs (HTML)
+        run: |
+          sphinx-build -b html "$SPHINX_SRC_DIR" "$SPHINX_SRC_DIR/_build/html"
+          # Variante stricte :
+          # sphinx-build -b html -W -n "$SPHINX_SRC_DIR" "$SPHINX_SRC_DIR/_build/html"
+
+      - name: Upload docs artifact (site HTML)
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-html
+          path: b-UnitesEnseignement/Support/_build/html/**
+          if-no-files-found: error
+          retention-days: 7
+
+  export-exo:
+    runs-on: ubuntu-latest
+    needs: build-docs
+    timeout-minutes: 25
+    env:
+      SPHINX_SRC_DIR: b-UnitesEnseignement/Support
+      HTML_OUT_DIR: b-UnitesEnseignement/Support/_build/html
+      PDF_OUT_DIR: b-UnitesEnseignement/Support/_build/exo-pdf
+    steps:
+      - uses: actions/checkout@v4
+
+      # Récupère le HTML buildé par le job précédent
+      - name: ⬇️ Download site HTML
+        uses: actions/download-artifact@v4
+        with:
+          name: site-html
+          path: b-UnitesEnseignement/Support/_build/html
+
+      # Node + Playwright
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm --yes init -y
+          npm i --no-save playwright@1
+          npx playwright install --with-deps chromium
+
+      - name: Export exercices en PDF
+        run: |
+          node <<'NODE'
+          import { promises as fs } from 'fs';
+          import path from 'path';
+          import { chromium } from 'playwright';
+          import crypto from 'crypto';
+
+          const SRC = process.env.SPHINX_SRC_DIR || 'b-UnitesEnseignement/Support';
+          const HTML_OUT = process.env.HTML_OUT_DIR || path.join(SRC, '_build/html');
+          const PDF_OUT = process.env.PDF_OUT_DIR || path.join(SRC, '_build/exo-pdf');
+
+          async function* walk(dir) {
+            for (const d of await fs.readdir(dir, { withFileTypes: true })) {
+              const p = path.join(dir, d.name);
+              if (d.isDirectory()) yield* walk(p);
+              else yield p;
+            }
+          }
+
+          function shortHash(s) {
+            return crypto.createHash('md5').update(s).digest('hex').slice(0, 6);
+          }
+
+          // Collecte des .md sous un dossier nommé "exercices"
+          const mdFiles = [];
+          for await (const p of walk(SRC)) {
+            if (!p.toLowerCase().endsWith('.md')) continue;
+            const parts = p.split(path.sep).map(s => s.toLowerCase());
+            if (!parts.includes('exercices')) continue;
+            if (path.basename(p).toLowerCase() === 'index.md') continue; // ignore index.md
+            mdFiles.push(p);
+          }
+
+          if (!mdFiles.length) {
+            console.log('Aucun exercice (hors index.md) trouvé.');
+            process.exit(0);
+          }
+
+          await fs.mkdir(PDF_OUT, { recursive: true });
+          const bucketExo = path.join(PDF_OUT, 'exercices');
+          const bucketSol = path.join(PDF_OUT, 'solutions');
+          await fs.mkdir(bucketExo, { recursive: true });
+          await fs.mkdir(bucketSol, { recursive: true });
+
+          const browser = await chromium.launch();
+          const ctx = await browser.newContext({ locale: 'fr-CH' });
+          const page = await ctx.newPage();
+
+          let converted = 0, skipped = 0;
+
+          for (const mdPath of mdFiles) {
+            const rel = path.relative(SRC, mdPath); // ex: objX/.../exercices/mon-exo.md
+            const htmlRel = rel.replace(/\.md$/i, '.html');
+            const htmlAbs = path.join(HTML_OUT, htmlRel);
+
+            try { await fs.access(htmlAbs); }
+            catch { console.warn('⚠️ HTML introuvable (skippé) :', htmlAbs); skipped++; continue; }
+
+            const parent = path.basename(path.dirname(mdPath)).toLowerCase();
+            const bucket = (parent === 'solutions') ? bucketSol : bucketExo;
+
+            const baseName = path.basename(mdPath, '.md');
+            let pdfName = `${baseName}.pdf`;
+            let pdfTarget = path.join(bucket, pdfName);
+
+            try {
+              await fs.access(pdfTarget);
+              const h = shortHash(rel);
+              pdfName = `${baseName}-${h}.pdf`;
+              pdfTarget = path.join(bucket, pdfName);
+            } catch { /* pas de collision */ }
+
+            const fileUrl = 'file://' + path.resolve(htmlAbs);
+
+            await page.goto(fileUrl, { waitUntil: 'load' });
+            await page.waitForLoadState('networkidle');
+
+            await page.addStyleTag({ content: `
+              @page { size: A4; margin: 14mm; }
+              .monaco-mount, .CodeMirror, #export-answers { display: none !important; }
+              .answer-block textarea { min-height: 5rem; border: 1px solid #bbb; }
+              a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; }
+            `});
+
+            await page.pdf({
+              path: pdfTarget,
+              printBackground: false,
+              preferCSSPageSize: true,
+              format: 'A4',
+              margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' },
+            });
+
+            console.log('✓ PDF', path.relative(PDF_OUT, pdfTarget));
+            converted++;
+          }
+
+          await browser.close();
+          console.log(`Terminé: ${converted} PDF créés, ${skipped} ignorés`);
+          NODE
+
+      - name: Upload PDFs (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: exercices-pdf
+          path: b-UnitesEnseignement/Support/_build/exo-pdf/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Préparer /exercices (plats) + index
+        env:
+          PDF_ROOT: b-UnitesEnseignement/Support/_build/exo-pdf
+        run: |
+          set -euo pipefail
+          mkdir -p site-exo/exercices site-exo/exercices/solutions
+
+          # 1) Copier EXERCICES
+          if [ -d "${PDF_ROOT}/exercices" ]; then
+            cp -f "${PDF_ROOT}/exercices/"*.pdf site-exo/exercices/ 2>/dev/null || true
+          fi
+
+          # 2) Copier SOLUTIONS
+          if [ -d "${PDF_ROOT}/solutions" ]; then
+            cp -f "${PDF_ROOT}/solutions/"*.pdf site-exo/exercices/solutions/ 2>/dev/null || true
+          fi
+
+          # 3) Générer index.html statique
+          node <<'NODE'
+          import { promises as fs } from 'fs';
+          import path from 'path';
+
+          const ROOT = 'site-exo/exercices';
+          const EXO = path.join(ROOT);
+          const SOL = path.join(ROOT, 'solutions');
+
+          async function listPdfs(dir) {
+            try {
+              const files = await fs.readdir(dir);
+              return files.filter(f => f.toLowerCase().endsWith('.pdf')).sort((a,b)=>a.localeCompare(b));
+            } catch { return []; }
+          }
+
+          const exo = await listPdfs(EXO);
+          const sol = await listPdfs(SOL);
+
+          const rows = [];
+
+          if (exo.length) {
+            rows.push(`<h2>Exercices</h2>`);
+            rows.push(`<ul>`);
+            for (const f of exo) rows.push(`<li><a href="./${encodeURIComponent(f)}" download>${f}</a></li>`);
+            rows.push(`</ul>`);
+          }
+
+          if (sol.length) {
+            rows.push(`<h2>Solutions</h2>`);
+            rows.push(`<ul>`);
+            for (const f of sol) rows.push(`<li><a href="./solutions/${encodeURIComponent(f)}" download>${f}</a></li>`);
+            rows.push(`</ul>`);
+          }
+
+          const html = `<!doctype html>
+          <html lang="fr">
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Exercices — Téléchargements</title>
+          <style>
+            :root { color-scheme: light dark; }
+            body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f7f7fb;color:#111}
+            header{padding:1rem 1.25rem;background:#0f172a;color:#e2e8f0}
+            header h1{margin:0;font-size:1.15rem}
+            main{max-width:900px;margin:0 auto;padding:1rem 1.25rem}
+            h2{margin:1rem 0 .25rem;font-size:1rem;color:#0f172a}
+            ul{margin:.25rem 0 1rem 1rem}
+            a{color:#0ea5e9;text-decoration:none}
+            a:hover{text-decoration:underline}
+            .empty{opacity:.7}
+          </style>
+          <header><h1>📚 Exercices — Téléchargements PDF</h1></header>
+          <main>
+            ${rows.length ? rows.join('\n') : '<p class="empty">Aucun PDF disponible pour le moment.</p>'}
+          </main>
+          </html>`;
+          await fs.writeFile(path.join(ROOT, 'index.html'), html, 'utf8');
+          console.log(`index.html généré avec ${exo.length} exercices et ${sol.length} solutions`);
+          NODE
+
+      - name: Upload /exercices index (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: exercices-flat
+          path: site-exo/exercices/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  deploy:
+    name: "🎉 Deploy"
+    needs: [build-docs, export-exo]
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Download site HTML
+        uses: actions/download-artifact@v4
+        with:
+          name: site-html
+          path: site
+
+      - name: ⬇️ Download exercices (flat)
+        uses: actions/download-artifact@v4
+        with:
+          name: exercices-flat
+          path: site-exo/exercices
+
+      # 1) Déploiement DOCS (site HTML)
+      - name: 📂 Sync cours (HTML)
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+        with:
+          server: ${{ vars.FTP_SERVER }}          # hostname ou IPv4, sans schéma
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: site/
+          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_DOCS_DIR }}/
+          state-name: .ftp-sync-support.json
+          log-level: minimal
+          timeout: 300000
+
+      # 2) Déploiement EXERCICES (PDF + index)
+      - name: 📂 Sync /exercices
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+        with:
+          server: ${{ vars.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: site-exo/exercices/
+          server-dir: ${{ vars.ICT_ROOT_FOLDER }}/${{ vars.ICT_MODULE}}/${{ vars.FTP_EXO_DIR }}/
+          state-name: .ftp-sync-exercices.json
+          log-level: minimal
+          timeout: 300000

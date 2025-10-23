@@ -1,0 +1,31 @@
+name: Aide ou problème (élèves)
+description: Demande d'aide ou signalement pour le support de cours
+title: "[Élève] - "
+labels: [eleve]
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type de demande
+      options:
+        - J’ai une question
+        - J’ai trouvé une erreur
+        - Je propose une amélioration
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Décrivez votre besoin avec vos mots
+      description: Expliquez votre problème ou votre suggestion simplement
+      placeholder: "J’ai essayé la commande..., mais j’ai eu le message..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: capture
+    attributes:
+      label: Capture ou extrait
+      description: Ajoutez une capture d’écran ou collez un message d’erreur
+      placeholder: "Copiez/collez ici votre message d’erreur ou joignez une image"
